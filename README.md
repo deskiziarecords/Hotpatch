@@ -92,3 +92,84 @@ make
 ```
 ---
 
+## OCaml Meta-Checker
+```bash
+cd ocaml
+dune build
+```
+## Fuzzing (libFuzzer)
+
+Requires Clang:
+
+```bash
+cmake -DFUZZ=ON ..
+make fuzz_target
+./fuzz_target
+
+```
+## Security Model
+### Threats Addressed
+
+malformed certificates
+
+adversarial bit-patterns
+
+timing attacks on equality checks
+
+misaligned or unbounded parsing
+
+unapproved normative changes
+
+unvetted ε-parameters
+
+side-channel leakage inconsistencies
+
+rollback state corruption
+
+### Threats Explicitly Not Addressed
+
+microarchitectural leakage beyond ℳ₄ model
+
+hardware trojans
+
+undefined governance processes outside ℳ₃
+
+undefined behavior in sandboxed “yellow” modules
+
+Clear threat boundaries improve audit clarity.
+
+## Governance & Normative Layer (ℳ₃)
+
+All normative decisions (safety weights, acceptable ε, budget ceilings, and permissible model classes) are stored as:
+
+multi-sig validated transactions
+
+stake-weighted votes
+
+immutable merkle-root logs
+
+hash-linked provenance references inside every 512-byte cert
+
+The runtime checker enforces these decisions deterministically.
+
+## Contributing
+
+### This is a high-assurance project.
+All contributions must:
+
+preserve constant-time properties
+
+avoid data-dependent branching
+
+compile without warnings under -Wall -Wextra -Werror
+
+include unit tests
+
+include fuzz seeds for new parsers
+
+pass differential testing against the OCaml reference checker
+
+Formal adjustments (Coq) must preserve soundness in ℳ₁/ℳ₂ and be accompanied by a written design note.
+
+## Credits
+Author: J. Roberto Jiménez 
