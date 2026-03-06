@@ -15,6 +15,7 @@ int verify_cert(const uint8_t cert[512],
                 const uint8_t expected_pubhash[32],
                 uint64_t max_wcet_ns,
                 uint64_t max_budget,
-                uint8_t max_agents);
+                uint8_t max_agents,
+                uint8_t max_epsilon);
 
 #endif // VERIFY_CERT_H
