@@ -55,7 +55,7 @@ jobs:
       - name: Build fuzz target
         run: |
           clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
-                fuzz/libfuzzer_harness.c src/runtime/verify_cert.c -o fuzz_target
+                fuzz/libfuzzer_harness.c src/runtime/verify_cert.c src/runtime/hmac_sha256.c -o fuzz_target
 
       - name: Generate seed corpus
         run: python3 tools/gen_corpus.py
@@ -63,7 +63,7 @@ jobs:
       - name: Run fuzzer
         run: |
           mkdir -p artifacts
-          ./fuzz_target -max_total_time=60 -max_len=520 -artifact_prefix=artifacts/ fuzz_corpus
+          ./fuzz_target -max_total_time=60 -max_len=521 -artifact_prefix=artifacts/ fuzz_corpus
 
       - name: Upload crash artifacts
         if: failure()

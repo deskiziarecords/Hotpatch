@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # tools/generate_test_cert.py
 # Creates a valid test_cert.bin for manual testing.
+import hashlib
+import hmac
 import sys
 def make_cert(path="test_cert.bin"):
     cert = bytearray(512)
@@ -11,6 +13,8 @@ def make_cert(path="test_cert.bin"):
     cert[0xC0] = 5
     cert[0xC1] = 50   # leakage_attestation
     cert[0xC2:0xC2+8] = (1).to_bytes(8,'big')   # epoch
+    # MAC under the test key bytes(range(32)); see tests/diff_test.sh
+    cert[0x1E0:0x200] = hmac.new(bytes(range(32)), bytes(cert[:0x1E0]), hashlib.sha256).digest()
     with open(path,'wb') as f:
         f.write(cert)
     print("wrote", path)

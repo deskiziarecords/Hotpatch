@@ -14,9 +14,11 @@ Crash inputs from the fuzz job are uploaded as the `fuzz-artifacts` artifact.
 
 ```bash
 clang -g -O1 -fsanitize=fuzzer,address,undefined \
-      fuzz/libfuzzer_harness.c src/runtime/verify_cert.c -o fuzz_target
+      fuzz/libfuzzer_harness.c src/runtime/verify_cert.c src/runtime/hmac_sha256.c -o fuzz_target
 python3 tools/gen_corpus.py
-./fuzz_target -max_len=520 fuzz_corpus
+./fuzz_target -max_len=521 fuzz_corpus
 ```
 
-Inputs longer than 512 bytes carry `last_epoch` in the trailing bytes (big-endian, up to 8), so `-max_len=520` lets the fuzzer explore the replay boundary.
+Input format: the 512-byte certificate, then up to 8 bytes of stored epoch (big-endian), then one flag byte. If the flag's low bit is set, the harness re-signs the certificate with the test key, so mutations also reach the checks after the MAC; otherwise almost every input is rejected at the MAC step.
+
+The harness drives `hp_accept_cert` and traps if the counter moves on a rejected certificate or fails to move forward on an accepted one.

@@ -1,6 +1,7 @@
 // src/runtime/verify_cert.c
 // Constant-time, WCET-friendly verifier for 512-byte hot-patch certificates.
-// Ceilings and key_id come from the trust anchor; the epoch blocks replay.
+// Ceilings, key_id, the epoch counter and the MAC all come from the trust
+// anchor; nothing security-relevant is a caller argument.
 // - No data-dependent branches in hot path
 // - Bytewise loads for safety on unaligned platforms
 // - Uses only bitwise ops and integer compares
@@ -46,15 +47,18 @@ static inline uint32_t normalize_bool_u32(uint32_t v) {
     return (v | (0u - v)) >> 31;
 }
 
-uint64_t hp_cert_epoch(const uint8_t cert[HP_CERT_SIZE]) {
-    return load_be64(cert + HP_OFF_EPOCH);
-}
-
 // Public API
-int verify_cert(const uint8_t cert[HP_CERT_SIZE],
-                const hp_anchor_t *anchor,
-                uint64_t last_epoch)
+int verify_cert(const uint8_t cert[HP_CERT_SIZE], const hp_anchor_t *anchor)
 {
+    // Step 0: MAC over everything before the MAC field, constant-time compare
+    uint8_t mac[HP_MAC_SIZE];
+    anchor->mac(anchor->ctx, cert, HP_OFF_MAC, mac);
+    uint32_t mac_diff = 0;
+    for (size_t i = 0; i < HP_MAC_SIZE; ++i) {
+        mac_diff |= (uint32_t)(cert[HP_OFF_MAC + i] ^ mac[i]);
+    }
+    uint32_t mac_ok = normalize_bool_u32(mac_diff) ^ 1u;
+
     // Step 1: constant-time 32-byte equality against the anchor's key_id
     uint32_t key_diff = 0;
     for (size_t i = 0; i < 32; ++i) {
@@ -62,6 +66,7 @@ int verify_cert(const uint8_t cert[HP_CERT_SIZE],
     }
     // key_ok = (key_diff == 0) ? 1 : 0
     uint32_t key_ok = normalize_bool_u32(key_diff) ^ 1u;
+    uint64_t last_epoch = anchor->read_epoch(anchor->ctx);
 
     // Step 2: extract numeric fields (bytewise, big-endian)
     uint64_t wcet = load_be64(cert + HP_OFF_WCET);
@@ -81,8 +86,16 @@ int verify_cert(const uint8_t cert[HP_CERT_SIZE],
     uint32_t epoch_ok = ct_leq_u64(epoch, last_epoch) ^ 1u;
 
     // Combine all using bitwise AND (still constant-time)
-    uint32_t ok = key_ok & wcet_ok & budget_ok & agents_ok & leakage_ok & epoch_ok;
+    uint32_t ok = mac_ok & key_ok & wcet_ok & budget_ok & agents_ok & leakage_ok & epoch_ok;
 
     // Ensure return is 1 or 0
     return (int)(ok & 1u);
+}
+
+int hp_accept_cert(const uint8_t cert[HP_CERT_SIZE], const hp_anchor_t *anchor)
+{
+    // Order matters: authenticate before touching the counter, always.
+    // This branch is on the verdict, not on secret data.
+    if (!verify_cert(cert, anchor)) return 0;
+    return anchor->advance_epoch(anchor->ctx, load_be64(cert + HP_OFF_EPOCH)) == 1;
 }
