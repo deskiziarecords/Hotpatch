@@ -1,1 +1,73 @@
 name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.cc }}${{ matrix.sanitize && ', ASan+UBSan' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        sanitize: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run unit tests
+        env:
+          SAN_FLAGS: ${{ matrix.sanitize && '-g -fsanitize=address,undefined -fno-sanitize-recover=all' || '' }}
+        run: |
+          make CC=${{ matrix.cc }} \
+               CFLAGS="-O2 -Wall -Wextra -Werror -std=c11 $SAN_FLAGS" \
+               test
+
+  differential:
+    name: Differential test (C vs OCaml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OCaml
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ocaml
+          ocamlc -version
+
+      - name: Run differential test
+        run: |
+          bash tests/diff_test.sh | tee diff_output.txt
+          # diff_test.sh passes without OCaml; in CI the comparison must not be skipped
+          grep -q "All differential tests passed!" diff_output.txt
+
+  fuzz:
+    name: libFuzzer (60 s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build fuzz target
+        run: |
+          clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+                fuzz/libfuzzer_harness.c src/runtime/verify_cert.c -o fuzz_target
+
+      - name: Generate seed corpus
+        run: python3 tools/gen_corpus.py
+
+      - name: Run fuzzer
+        run: |
+          mkdir -p artifacts
+          ./fuzz_target -max_total_time=60 -max_len=520 -artifact_prefix=artifacts/ fuzz_corpus
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: artifacts/
