@@ -1,5 +1,6 @@
 // src/runtime/verify_cert.c
 // Constant-time, WCET-friendly verifier for 512-byte hot-patch certificates.
+// Ceilings and key_id come from the trust anchor; the epoch blocks replay.
 // - No data-dependent branches in hot path
 // - Bytewise loads for safety on unaligned platforms
 // - Uses only bitwise ops and integer compares
@@ -45,37 +46,42 @@ static inline uint32_t normalize_bool_u32(uint32_t v) {
     return (v | (0u - v)) >> 31;
 }
 
+uint64_t hp_cert_epoch(const uint8_t cert[HP_CERT_SIZE]) {
+    return load_be64(cert + HP_OFF_EPOCH);
+}
+
 // Public API
-int verify_cert(const uint8_t cert[512],
-                const uint8_t expected_pubhash[32],
-                uint64_t max_wcet_ns,
-                uint64_t max_budget,
-                uint8_t max_agents,
-                uint8_t max_epsilon)
+int verify_cert(const uint8_t cert[HP_CERT_SIZE],
+                const hp_anchor_t *anchor,
+                uint64_t last_epoch)
 {
-    // Step 1: constant-time 32-byte equality
-    uint32_t hash_diff = 0;
+    // Step 1: constant-time 32-byte equality against the anchor's key_id
+    uint32_t key_diff = 0;
     for (size_t i = 0; i < 32; ++i) {
-        hash_diff |= (uint32_t)(cert[i] ^ expected_pubhash[i]);
+        key_diff |= (uint32_t)(cert[HP_OFF_KEY_ID + i] ^ anchor->key_id[i]);
     }
-    // hash_ok = (hash_diff == 0) ? 1 : 0
-    uint32_t hash_ok = normalize_bool_u32(hash_diff) ^ 1u;
+    // key_ok = (key_diff == 0) ? 1 : 0
+    uint32_t key_ok = normalize_bool_u32(key_diff) ^ 1u;
 
     // Step 2: extract numeric fields (bytewise, big-endian)
-    uint64_t wcet = load_be64(cert + 0xB0);
-    uint64_t deltaB = load_be64(cert + 0xB8);
-    uint8_t A = cert[0xC0];
-    uint8_t epsilon = cert[0xC1];
+    uint64_t wcet = load_be64(cert + HP_OFF_WCET);
+    uint64_t deltaB = load_be64(cert + HP_OFF_BUDGET);
+    uint8_t A = cert[HP_OFF_AGENTS];
+    uint8_t leakage = cert[HP_OFF_LEAKAGE];
+    uint64_t epoch = load_be64(cert + HP_OFF_EPOCH);
     // All fields are treated as unsigned and compared via ct_leq
 
-    // Step 3: constant-time comparisons
-    uint32_t wcet_ok = ct_leq_u64(wcet, max_wcet_ns);
-    uint32_t budget_ok = ct_leq_u64(deltaB, max_budget);
-    uint32_t agents_ok = ct_leq_u8(A, max_agents);
-    uint32_t epsilon_ok = ct_leq_u8(epsilon, max_epsilon);
+    // Step 3: constant-time comparisons against the anchor's ceilings
+    uint32_t wcet_ok = ct_leq_u64(wcet, anchor->max_wcet_ns);
+    uint32_t budget_ok = ct_leq_u64(deltaB, anchor->max_budget);
+    uint32_t agents_ok = ct_leq_u8(A, anchor->max_agents);
+    uint32_t leakage_ok = ct_leq_u8(leakage, anchor->max_leakage);
+
+    // Step 4: replay/downgrade, epoch > last_epoch is !(epoch <= last_epoch)
+    uint32_t epoch_ok = ct_leq_u64(epoch, last_epoch) ^ 1u;
 
     // Combine all using bitwise AND (still constant-time)
-    uint32_t ok = hash_ok & wcet_ok & budget_ok & agents_ok & epsilon_ok;
+    uint32_t ok = key_ok & wcet_ok & budget_ok & agents_ok & leakage_ok & epoch_ok;
 
     // Ensure return is 1 or 0
     return (int)(ok & 1u);
