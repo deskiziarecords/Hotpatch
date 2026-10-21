@@ -1,8 +1,8 @@
-// src/runtime/hmac_sha256.c
-// Software HMAC-SHA256 reference. No table lookups indexed by message data;
-// running time depends only on message length, which is fixed for certs.
+// src/runtime/sha256.c
+// SHA-256 (FIPS 180-4). No table lookups indexed by message data; running
+// time depends only on message length, which is fixed for certs.
 
-#include "hmac_sha256.h"
+#include "sha256.h"
 #include <string.h>
 
 static const uint32_t K[64] = {
@@ -102,35 +102,5 @@ void sha256(const uint8_t *msg, size_t len, uint8_t out[32]) {
     sha256_ctx c;
     sha256_init(&c);
     sha256_update(&c, msg, len);
-    sha256_final(&c, out);
-}
-
-void hmac_sha256(const uint8_t *key, size_t key_len,
-                 const uint8_t *msg, size_t len,
-                 uint8_t out[32]) {
-    uint8_t k[64];
-    memset(k, 0, sizeof(k));
-    if (key_len > 64) {
-        sha256(key, key_len, k);
-    } else {
-        memcpy(k, key, key_len);
-    }
-
-    uint8_t ipad[64], opad[64];
-    for (int i = 0; i < 64; ++i) {
-        ipad[i] = k[i] ^ 0x36;
-        opad[i] = k[i] ^ 0x5c;
-    }
-
-    uint8_t inner[32];
-    sha256_ctx c;
-    sha256_init(&c);
-    sha256_update(&c, ipad, 64);
-    sha256_update(&c, msg, len);
-    sha256_final(&c, inner);
-
-    sha256_init(&c);
-    sha256_update(&c, opad, 64);
-    sha256_update(&c, inner, 32);
     sha256_final(&c, out);
 }

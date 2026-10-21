@@ -17,7 +17,7 @@ It checks **512-byte hot-patch certificates** against fixed ceilings, using:
 All expensive verification steps (formal logic, leakage analysis, model proofs, Coq kernel validation, governance attestations) run **offline** and are encoded as small constants inside the certificate.  
 The runtime checker performs only:
 
-1. **MAC check**: HMAC-SHA256 over the whole certificate, through the platform's MAC hook (see [Trust Anchor](#trust-anchor))  
+1. **attestation check**: SHA-256 of the whole certificate, compared in constant time with the digest the root-of-trust latched after verifying the Ed25519 signature off-path (see [Trust Anchor](#trust-anchor))  
 2. **key_id check** against the anchor  
 3. **constant-time bound checks** against the anchor's ceilings (WCET / budget / agents / leakage attestation)  
 4. **epoch check** against the platform's monotonic counter (replay / downgrade)  
@@ -62,24 +62,32 @@ At runtime the verifier compares the *declared* `leakage_attestation` value agai
 
 A hash comparison only proves integrity if the reference value lives somewhere the agent being patched **cannot write**. A value in a register, RAM, or a writable flash page has no authority; the wiring does.
 
-Nothing security-relevant is a caller argument. `hp_anchor_t` (`src/runtime/verify_cert.h`) carries the identity, the ceilings, and three platform hooks:
+**Authentication is off-path, and the device holds no secret.**
+
+| Step | Where | What it does |
+|------|-------|--------------|
+| Sign | Offline (`tools/sign_cert.py`; an HSM in production) | Ed25519 over bytes `0x000..0x1BF`; signature at `0x1C0..0x1FF` |
+| Attest | Root-of-trust, off the bounded path (`src/rot/rot_attest.c`, reference using libsodium) | Verifies the signature with the public key held in its OTP. On success, latches SHA-256 of all 512 bytes in a register only it can write; on failure, clears the latch |
+| Verify | Bounded path (`verify_cert`) | Hashes the 512 bytes and compares with the latch in constant time |
+
+The bounded path runs no Ed25519 (which is not trivially constant-time) and holds no key, so there is nothing on the device to steal: an agent that can read everything still cannot forge a certificate. Because the digest covers the exact 512 bytes the root-of-trust checked, swapping or editing the buffer after attestation (TOCTOU) is rejected.
+
+Nothing security-relevant is a caller argument. `hp_anchor_t` (`src/runtime/verify_cert.h`) carries the identity, the ceilings, and the platform hooks:
 
 | Hook | Must be backed by |
 |------|-------------------|
-| `mac` | HMAC-SHA256 under a key the agent cannot read: a hardware engine with a sealed key |
+| `read_attestation` | The root-of-trust's latch: readable by the verifier, writable only by the root-of-trust |
 | `read_epoch` / `advance_epoch` | Monotonic storage the verified agent cannot rewrite: write-once/monotonic NVRAM, OTP counter, RPMB, or a register only the root-of-trust can write. The storage itself must refuse non-increasing values |
 
-The platform must place the anchor itself in storage the agent cannot write (OTP, ROM, or memory locked by the root-of-trust). The verifier cannot check any of these placements; it only reads through the anchor. If the counter can be rewritten by software, replay protection is only a suggestion. If the agent can read the MAC key, it can forge certificates.
+The platform must place the anchor itself in storage the agent cannot write (OTP, ROM, or memory locked by the root-of-trust). The verifier cannot check any of these placements; it only reads through the anchor. If the counter can be rewritten by software, replay protection is only a suggestion. If the agent can write the latch, it can make the verifier accept anything.
 
 **API.**
 - `verify_cert(cert, anchor)` is a pure check with no side effects.
-- `hp_accept_cert(cert, anchor)` is the **only** path that advances the counter: it authenticates first, then advances. Apply a patch only if it returns 1.
+- `hp_accept_cert(cert, anchor)` is the **only** path that advances the counter: it checks the attestation first, then advances. Apply a patch only if it returns 1.
 
-**Order matters.** Advancing the counter before authenticating would let a forged certificate with `epoch = 2⁶⁴−1` push the counter to the maximum and permanently refuse every future update: a self-inflicted brick, with no memory exploit and no timing attack. The counter is only advanced after the MAC check passes, always.
+**Order matters.** Advancing the counter before authenticating would let a forged certificate with `epoch = 2⁶⁴−1` push the counter to the maximum and permanently refuse every future update: a self-inflicted brick, with no memory exploit and no timing attack. The root-of-trust never attests a forged certificate, and the counter only moves after the attestation check passes, always.
 
-**Software reference.** `src/runtime/hmac_sha256.c` is a software HMAC-SHA256, tested against the FIPS 180-4 and RFC 4231 vectors and cross-checked against the OCaml reference and Python's `hmac`. Tests, CI and the CLI harness use it with the fixed test key `00 01 … 1f`. A key held in software is readable by anything that shares its address space, so on a device the `mac` hook should be a hardware engine.
-
-**Alternative: off-path signature.** If the platform has no sealed key block, verify an Ed25519 (or similar) signature in a separate root-of-trust before the certificate reaches the bounded path, and have the `mac` hook check the result in an unwritable latch. Ed25519 is not trivially constant-time and must **not** be placed inside the bounded hot path without its own timing analysis.
+**Evidence.** Three independent implementations must agree end to end: Python `cryptography` signs, libsodium verifies the signature and computes the latched SHA-256, and `src/runtime/sha256.c` (FIPS 180-4 vectors) and the OCaml reference recompute it. `tests/test_rot.c` also checks libsodium against the RFC 8032 Ed25519 vector. Tests use the fixed seed `00 01 … 1f`; it is not a key.
 
 ---
 
@@ -165,9 +173,9 @@ A fixed-size certificate has two obvious attacks. Both are checked in the consta
 
 - **Replay.** The certificate carries a monotonic `epoch` (u64, offset `0xC2`). It is accepted only if `epoch > anchor->read_epoch()`. On accept, `hp_accept_cert` advances the counter to the certificate's epoch; apply the patch only after that succeeds.
 - **Downgrade.** An older certificate with a larger `leakage_attestation` (or larger budget / WCET) is rejected by the same epoch check. Ceilings come from the anchor, not from the caller, so a newer certificate cannot exceed them either.
-- **Counter exhaustion (brick).** The epoch is covered by the MAC and the counter only moves after the MAC check, so a forged `epoch = 2⁶⁴−1` cannot reach the counter.
+- **Counter exhaustion (brick).** The epoch is covered by the signature, the root-of-trust never attests a forged certificate, and the counter only moves after the attestation check, so a forged `epoch = 2⁶⁴−1` cannot reach the counter.
 
-All three hold only if the counter, the anchor and the MAC key are truly out of the agent's reach (see [Trust Anchor](#trust-anchor)). A *legitimately signed* certificate with `epoch = 2⁶⁴−1` still exhausts the counter; the offline signing process must not issue one.
+All three hold only if the counter, the anchor and the attestation latch are truly out of the agent's reach (see [Trust Anchor](#trust-anchor)). A *legitimately signed* certificate with `epoch = 2⁶⁴−1` still exhausts the counter; the offline signing process must not issue one.
 
 ### Certificate Layout
 
@@ -179,7 +187,7 @@ All three hold only if the counter, the anchor and the MAC key are truly out of 
 | `0xC0` | `agents` | u8 |
 | `0xC1` | `leakage_attestation` | u8 |
 | `0xC2` | `epoch` | u64 BE |
-| `0x1E0` | `mac`: HMAC-SHA256 over bytes `0x000..0x1DF` | 32 bytes |
+| `0x1C0` | `signature`: Ed25519 over bytes `0x000..0x1BF` | 64 bytes |
 
 ### Threats Explicitly Not Addressed
 

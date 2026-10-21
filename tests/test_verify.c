@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "../src/runtime/verify_cert.h"
-#include "../src/runtime/hmac_sha256.h"
+#include "../src/runtime/sha256.h"
 
 static int failures = 0;
 
@@ -25,11 +25,12 @@ static void check_hex(const char *name, const uint8_t got[32], const char *expec
     }
 }
 
-// ---- Simulated platform: monotonic counter + software MAC with a test key ----
+// ---- Simulated platform: monotonic counter + root-of-trust latch ----
 
 typedef struct {
     uint64_t counter;
-    uint8_t  key[32];
+    int      latch_valid;
+    uint8_t  latch[32];
     int      advance_calls;
     int      fail_advance;
 } test_platform_t;
@@ -47,9 +48,11 @@ static int tp_advance_epoch(void *ctx, uint64_t epoch) {
     return 1;
 }
 
-static void tp_mac(void *ctx, const uint8_t *msg, size_t len, uint8_t out[32]) {
+static int tp_read_attestation(void *ctx, uint8_t digest[32]) {
     test_platform_t *p = ctx;
-    hmac_sha256(p->key, sizeof(p->key), msg, len, out);
+    if (!p->latch_valid) return 0;
+    memcpy(digest, p->latch, 32);
+    return 1;
 }
 
 static void put_be64(uint8_t *p, uint64_t v) {
@@ -59,12 +62,15 @@ static void put_be64(uint8_t *p, uint64_t v) {
     }
 }
 
-static void sign_cert(uint8_t cert[HP_CERT_SIZE], const test_platform_t *p) {
-    hmac_sha256(p->key, sizeof(p->key), cert, HP_OFF_MAC, cert + HP_OFF_MAC);
+// Simulates the root-of-trust after a successful signature check: latches
+// SHA-256 of the cert. Ed25519 itself is tested in tests/test_rot.c.
+static void sign_cert(uint8_t cert[HP_CERT_SIZE], test_platform_t *p) {
+    sha256(cert, HP_CERT_SIZE, p->latch);
+    p->latch_valid = 1;
 }
 
-// helper to build a valid, signed cert in memory (key_id zeros, epoch 7)
-static void build_valid_cert(uint8_t cert[HP_CERT_SIZE], const test_platform_t *p) {
+// helper to build a valid, attested cert in memory (key_id zeros, epoch 7)
+static void build_valid_cert(uint8_t cert[HP_CERT_SIZE], test_platform_t *p) {
     memset(cert, 0, HP_CERT_SIZE);
     put_be64(cert + HP_OFF_WCET, 150000ull);
     put_be64(cert + HP_OFF_BUDGET, 1000ull);
@@ -89,20 +95,6 @@ static void test_sha256_vectors(void) {
     sha256((const uint8_t *)m56, strlen(m56), out);
     check_hex("SHA-256 56-byte (two-block padding)", out,
               "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
-
-    // RFC 4231 test case 2
-    const char *data = "what do ya want for nothing?";
-    hmac_sha256((const uint8_t *)"Jefe", 4, (const uint8_t *)data, strlen(data), out);
-    check_hex("HMAC-SHA256 RFC 4231 TC2", out,
-              "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-
-    // RFC 4231 test case 6: 131-byte key (hashed first)
-    uint8_t key131[131];
-    memset(key131, 0xaa, sizeof(key131));
-    const char *d6 = "Test Using Larger Than Block-Size Key - Hash Key First";
-    hmac_sha256(key131, sizeof(key131), (const uint8_t *)d6, strlen(d6), out);
-    check_hex("HMAC-SHA256 RFC 4231 TC6 (long key)", out,
-              "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
 }
 
 int main(void) {
@@ -110,7 +102,6 @@ int main(void) {
 
     test_platform_t plat;
     memset(&plat, 0, sizeof(plat));
-    for (int i = 0; i < 32; ++i) plat.key[i] = (uint8_t)i;
     plat.counter = 6;
 
     hp_anchor_t anchor;
@@ -121,7 +112,7 @@ int main(void) {
     anchor.max_leakage = 100;
     anchor.read_epoch = tp_read_epoch;
     anchor.advance_epoch = tp_advance_epoch;
-    anchor.mac = tp_mac;
+    anchor.read_attestation = tp_read_attestation;
     anchor.ctx = &plat;
 
     uint8_t cert[HP_CERT_SIZE];
@@ -129,26 +120,34 @@ int main(void) {
 
     check("valid", verify_cert(cert, &anchor), 1);
 
-    // MAC
-    cert[HP_OFF_MAC] ^= 1;
-    check("tampered MAC", verify_cert(cert, &anchor), 0);
+    // Attestation
+    plat.latch_valid = 0;
+    check("nothing latched", verify_cert(cert, &anchor), 0);
+    build_valid_cert(cert, &plat);
+
+    memset(plat.latch, 0, sizeof(plat.latch));
+    check("latch valid, zero digest", verify_cert(cert, &anchor), 0);
     build_valid_cert(cert, &plat);
 
     cert[0x50] ^= 1;
-    check("tampered unused byte (covered by MAC)", verify_cert(cert, &anchor), 0);
+    check("byte changed after attestation (TOCTOU)", verify_cert(cert, &anchor), 0);
+    build_valid_cert(cert, &plat);
+
+    cert[HP_OFF_SIG] ^= 1;
+    check("signature byte changed after attestation", verify_cert(cert, &anchor), 0);
     build_valid_cert(cert, &plat);
 
     cert[HP_OFF_LEAKAGE] = 10;
-    check("lowered leakage without re-MAC", verify_cert(cert, &anchor), 0);
+    check("lowered leakage, not re-attested", verify_cert(cert, &anchor), 0);
     build_valid_cert(cert, &plat);
 
-    // key_id (re-signed, so only the key_id check can reject it)
+    // key_id (re-attested, so only the key_id check can reject it)
     cert[0] = 1;
     sign_cert(cert, &plat);
-    check("wrong key_id, valid MAC", verify_cert(cert, &anchor), 0);
+    check("wrong key_id, attested", verify_cert(cert, &anchor), 0);
     build_valid_cert(cert, &plat);
 
-    // Ceilings (re-signed)
+    // Ceilings (re-attested)
     put_be64(cert + HP_OFF_WCET, 150001ull);
     sign_cert(cert, &plat);
     check("wcet over ceiling", verify_cert(cert, &anchor), 0);
@@ -184,7 +183,8 @@ int main(void) {
 
     // ---- hp_accept_cert: counter only moves after authentication ----
 
-    // Brick attempt: forged epoch UINT64_MAX without a valid MAC
+    // Brick attempt: forged epoch UINT64_MAX; the latch still holds the
+    // digest of the original cert, since the RoT never attested the forgery
     put_be64(cert + HP_OFF_EPOCH, UINT64_MAX);
     plat.advance_calls = 0;
     check("accept forged epoch=UINT64_MAX", hp_accept_cert(cert, &anchor), 0);

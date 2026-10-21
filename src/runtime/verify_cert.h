@@ -11,7 +11,7 @@
 //   0xC0         agents    (u8)      declared A
 //   0xC1         leakage_attestation (u8)  declared offline leakage value
 //   0xC2..0xC9   epoch     (u64)     monotonic; must exceed the stored epoch
-//   0x1E0..0x1FF mac[32]             HMAC-SHA256 over bytes 0x000..0x1DF
+//   0x1C0..0x1FF signature[64]       Ed25519 over bytes 0x000..0x1BF
 #define HP_CERT_SIZE        512
 #define HP_OFF_KEY_ID       0x00
 #define HP_OFF_WCET         0xB0
@@ -19,8 +19,15 @@
 #define HP_OFF_AGENTS       0xC0
 #define HP_OFF_LEAKAGE      0xC1
 #define HP_OFF_EPOCH        0xC2
-#define HP_OFF_MAC          0x1E0
-#define HP_MAC_SIZE         32
+#define HP_OFF_SIG          0x1C0
+#define HP_SIG_SIZE         64
+
+// Authentication is off-path. A separate root-of-trust holds the Ed25519
+// public key, verifies the signature before the cert reaches this verifier,
+// and on success latches SHA-256 of all 512 bytes in a register only it can
+// write (see src/rot/rot_attest.h). This verifier holds no key and runs no
+// Ed25519: it hashes the cert and compares against the latch in constant time,
+// which also binds the check to the exact bytes that were attested.
 
 // Trust anchor: identity, ceilings, and the platform's root-of-trust hooks.
 // The platform MUST place this in storage the patched agent cannot write
@@ -42,24 +49,26 @@ typedef struct {
     // storage itself must refuse epoch <= current value.
     int (*advance_epoch)(void *ctx, uint64_t epoch);
 
-    // HMAC-SHA256 of msg under a key the agent cannot read (hardware engine
-    // with a sealed key). hmac_sha256.h is a software reference for tests.
-    void (*mac)(void *ctx, const uint8_t *msg, size_t len, uint8_t out[32]);
+    // Reads the root-of-trust's attestation latch. Returns 1 and writes the
+    // latched SHA-256 if a signature was verified, 0 if nothing is latched.
+    // The latch must be writable only by the root-of-trust.
+    int (*read_attestation)(void *ctx, uint8_t digest[32]);
 
     void *ctx;
 } hp_anchor_t;
 
-// Pure check, no side effects. Accepts only if the MAC is valid, key_id
-// matches, every declared value is within the anchor's ceilings, and
-// epoch > anchor->read_epoch() (blocks replay and downgrade).
+// Pure check, no side effects. Accepts only if the root-of-trust attested
+// exactly these 512 bytes, key_id matches, every declared value is within the
+// anchor's ceilings, and epoch > anchor->read_epoch() (blocks replay and
+// downgrade).
 //
 // Returns 1 if certificate is accepted, 0 otherwise.
 int verify_cert(const uint8_t cert[HP_CERT_SIZE], const hp_anchor_t *anchor);
 
 // The only path that advances the counter: verifies first (including the
-// MAC), then advances the counter to the cert's epoch. A forged cert never
-// reaches advance_epoch, so it cannot push the counter to UINT64_MAX and
-// brick future updates. Apply the patch only if this returns 1.
+// attestation), then advances the counter to the cert's epoch. A forged cert
+// is never attested, so it cannot push the counter to UINT64_MAX and brick
+// future updates. Apply the patch only if this returns 1.
 //
 // Returns 1 if verified and the counter was advanced, 0 otherwise.
 int hp_accept_cert(const uint8_t cert[HP_CERT_SIZE], const hp_anchor_t *anchor);

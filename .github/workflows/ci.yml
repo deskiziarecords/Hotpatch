@@ -20,6 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install libsodium (reference root-of-trust)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsodium-dev
+
       - name: Build and run unit tests
         env:
           SAN_FLAGS: ${{ matrix.sanitize && '-g -fsanitize=address,undefined -fno-sanitize-recover=all' || '' }}
@@ -29,15 +34,15 @@ jobs:
                test
 
   differential:
-    name: Differential test (C vs OCaml)
+    name: Differential test (C vs OCaml, end-to-end signing)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install OCaml
+      - name: Install OCaml, libsodium, Python cryptography
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ocaml
+          sudo apt-get install -y --no-install-recommends ocaml libsodium-dev python3-cryptography
           ocamlc -version
 
       - name: Run differential test
@@ -55,7 +60,7 @@ jobs:
       - name: Build fuzz target
         run: |
           clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
-                fuzz/libfuzzer_harness.c src/runtime/verify_cert.c src/runtime/hmac_sha256.c -o fuzz_target
+                fuzz/libfuzzer_harness.c src/runtime/verify_cert.c src/runtime/sha256.c -o fuzz_target
 
       - name: Generate seed corpus
         run: python3 tools/gen_corpus.py

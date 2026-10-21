@@ -75,16 +75,12 @@ let sha256 (msg : Bytes.t) : Bytes.t =
     done) h;
   out
 
-(* HMAC-SHA256 (RFC 2104) *)
-let hmac_sha256 key msg =
-  let key = if Bytes.length key > 64 then sha256 key else key in
-  let k = Bytes.make 64 '\000' in
-  Bytes.blit key 0 k 0 (Bytes.length key);
-  let pad c = Bytes.map (fun x -> Char.chr (Char.code x lxor c)) k in
-  sha256 (Bytes.cat (pad 0x5c) (sha256 (Bytes.cat (pad 0x36) msg)))
-
-let verify cert key_id max_wcet max_budget max_agents max_leakage stored_epoch mac_key =
-  let mac_ok = Bytes.equal (hmac_sha256 mac_key (Bytes.sub cert 0 0x1E0)) (Bytes.sub cert 0x1E0 32) in
+(* attested: Some digest latched by the root-of-trust, or None *)
+let verify cert key_id max_wcet max_budget max_agents max_leakage stored_epoch attested =
+  let att_ok = match attested with
+    | Some d -> Bytes.equal (sha256 cert) d
+    | None -> false
+  in
   let key_ok =
     let rec check i =
       if i = 32 then true
@@ -105,7 +101,7 @@ let verify cert key_id max_wcet max_budget max_agents max_leakage stored_epoch m
   let leakage_ok = leakage <= max_leakage in
   let epoch_ok = u64_lt stored_epoch epoch in
 
-  mac_ok && key_ok && wcet_ok && budget_ok && agents_ok && leakage_ok && epoch_ok
+  att_ok && key_ok && wcet_ok && budget_ok && agents_ok && leakage_ok && epoch_ok
 
 let hex_to_bytes s =
   let n = String.length s / 2 in
@@ -124,7 +120,7 @@ let u8_of_string s = int_of_string s land 0xFF
 
 let () =
   if Array.length Sys.argv <> 9 then (
-    eprintf "Usage: %s <cert_path> <key_id_hex> <max_wcet_ns> <max_budget> <max_agents> <max_leakage> <stored_epoch> <mac_key_hex>\n" Sys.argv.(0);
+    eprintf "Usage: %s <cert_path> <key_id_hex> <max_wcet_ns> <max_budget> <max_agents> <max_leakage> <stored_epoch> <attested_digest_hex|none>\n" Sys.argv.(0);
     exit 2
   );
   let cert_path = Sys.argv.(1) in
@@ -134,7 +130,7 @@ let () =
   let max_agents = u8_of_string Sys.argv.(5) in
   let max_leakage = u8_of_string Sys.argv.(6) in
   let stored_epoch = u64_of_string Sys.argv.(7) in
-  let mac_key = hex_to_bytes Sys.argv.(8) in
+  let attested = if Sys.argv.(8) = "none" then None else Some (hex_to_bytes Sys.argv.(8)) in
 
   let key_id = hex_to_bytes key_id_hex in
   let ic = open_in_bin cert_path in
@@ -142,7 +138,7 @@ let () =
   really_input ic cert 0 512;
   close_in ic;
 
-  if verify cert key_id max_wcet max_budget max_agents max_leakage stored_epoch mac_key then (
+  if verify cert key_id max_wcet max_budget max_agents max_leakage stored_epoch attested then (
     printf "VERIFIED\n";
     exit 0
   ) else (

@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <string.h>
 #include "verify_cert.h"
-#include "hmac_sha256.h"
 
 static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t len) {
     if (strlen(hex) != len * 2) return -1;
@@ -14,11 +13,13 @@ static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t len) {
 }
 
 // Test/diff harness only. On a device the anchor lives in unwritable storage,
-// the epoch comes from a monotonic counter, and the MAC key is sealed in
-// hardware; none of them come from the command line.
+// the epoch comes from a monotonic counter, and the attested digest comes
+// from the root-of-trust latch; none of them come from the command line.
+// src/rot/rot_cli.c plays the root-of-trust and prints the digest.
 typedef struct {
     uint64_t stored_epoch;
-    uint8_t  mac_key[32];
+    int      latch_valid;
+    uint8_t  latch[32];
 } cli_platform_t;
 
 static uint64_t cli_read_epoch(void *ctx) {
@@ -31,14 +32,16 @@ static int cli_advance_epoch(void *ctx, uint64_t epoch) {
     return 0; // verify-only harness never advances
 }
 
-static void cli_mac(void *ctx, const uint8_t *msg, size_t len, uint8_t out[32]) {
+static int cli_read_attestation(void *ctx, uint8_t digest[32]) {
     cli_platform_t *p = ctx;
-    hmac_sha256(p->mac_key, sizeof(p->mac_key), msg, len, out);
+    if (!p->latch_valid) return 0;
+    memcpy(digest, p->latch, 32);
+    return 1;
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 9) {
-        fprintf(stderr, "Usage: %s <cert_path> <key_id_hex> <max_wcet_ns> <max_budget> <max_agents> <max_leakage> <stored_epoch> <mac_key_hex>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <cert_path> <key_id_hex> <max_wcet_ns> <max_budget> <max_agents> <max_leakage> <stored_epoch> <attested_digest_hex|none>\n", argv[0]);
         return 2;
     }
 
@@ -53,13 +56,15 @@ int main(int argc, char *argv[]) {
 
     cli_platform_t plat;
     plat.stored_epoch = strtoull(argv[7], NULL, 10);
-    if (hex_to_bytes(argv[8], plat.mac_key, 32) != 0) {
-        fprintf(stderr, "Invalid mac_key hex\n");
+    plat.latch_valid = strcmp(argv[8], "none") != 0;
+    memset(plat.latch, 0, sizeof(plat.latch));
+    if (plat.latch_valid && hex_to_bytes(argv[8], plat.latch, 32) != 0) {
+        fprintf(stderr, "Invalid attested_digest hex\n");
         return 2;
     }
     anchor.read_epoch = cli_read_epoch;
     anchor.advance_epoch = cli_advance_epoch;
-    anchor.mac = cli_mac;
+    anchor.read_attestation = cli_read_attestation;
     anchor.ctx = &plat;
 
     if (hex_to_bytes(key_id_hex, anchor.key_id, 32) != 0) {

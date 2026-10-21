@@ -4,21 +4,23 @@
 
 | Job | What it checks |
 |-----|----------------|
-| **unit** | `make test` with `-Wall -Wextra -Werror`, on gcc and clang, each with and without ASan+UBSan |
-| **differential** | `tests/diff_test.sh` with OCaml installed; fails if the C/OCaml comparison is skipped |
+| **unit** | `make test` (`test_verify` + `test_rot`) with `-Wall -Wextra -Werror`, on gcc and clang, each with and without ASan+UBSan |
+| **differential** | `tests/diff_test.sh` end to end: Python signs (Ed25519), the reference root-of-trust attests (libsodium), and the C and OCaml verifiers must agree; fails if the OCaml comparison is skipped |
 | **fuzz** | libFuzzer + ASan + UBSan on `fuzz/libfuzzer_harness.c` for 60 s, seeded by `tools/gen_corpus.py` |
 
 Crash inputs from the fuzz job are uploaded as the `fuzz-artifacts` artifact.
+
+Dependencies: `libsodium-dev` (reference root-of-trust and `test_rot`; the bounded verifier does not use it), `ocaml`, and `python3-cryptography` (offline signer, `tools/sign_cert.py`). To run `diff_test.sh` with a Python other than `python3`, set `PYTHON`.
 
 ## Running the fuzzer locally
 
 ```bash
 clang -g -O1 -fsanitize=fuzzer,address,undefined \
-      fuzz/libfuzzer_harness.c src/runtime/verify_cert.c src/runtime/hmac_sha256.c -o fuzz_target
+      fuzz/libfuzzer_harness.c src/runtime/verify_cert.c src/runtime/sha256.c -o fuzz_target
 python3 tools/gen_corpus.py
 ./fuzz_target -max_len=521 fuzz_corpus
 ```
 
-Input format: the 512-byte certificate, then up to 8 bytes of stored epoch (big-endian), then one flag byte. If the flag's low bit is set, the harness re-signs the certificate with the test key, so mutations also reach the checks after the MAC; otherwise almost every input is rejected at the MAC step.
+Input format: the 512-byte certificate, then up to 8 bytes of stored epoch (big-endian), then one flag byte. If the flag's low bit is set, the harness simulates a successful root-of-trust attestation of the certificate (it latches its SHA-256), so mutations also reach the checks after attestation; otherwise nothing is latched and every input must be rejected. Ed25519 runs off-path and is not fuzzed here.
 
-The harness drives `hp_accept_cert` and traps if the counter moves on a rejected certificate or fails to move forward on an accepted one.
+The harness drives `hp_accept_cert` and traps if an unattested certificate is accepted, if the counter moves on a rejected certificate, or if it fails to move forward on an accepted one.
