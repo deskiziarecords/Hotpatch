@@ -12,11 +12,36 @@ static int hex_to_bytes(const char *hex, uint8_t *bytes, size_t len) {
     return 0;
 }
 
-// Test/diff harness only: on a device the anchor and last_epoch come from
-// unwritable storage and a monotonic counter, never from the command line.
+// Test/diff harness only. On a device the anchor lives in unwritable storage,
+// the epoch comes from a monotonic counter, and the attested digest comes
+// from the root-of-trust latch; none of them come from the command line.
+// src/rot/rot_cli.c plays the root-of-trust and prints the digest.
+typedef struct {
+    uint64_t stored_epoch;
+    int      latch_valid;
+    uint8_t  latch[32];
+} cli_platform_t;
+
+static uint64_t cli_read_epoch(void *ctx) {
+    return ((cli_platform_t *)ctx)->stored_epoch;
+}
+
+static int cli_advance_epoch(void *ctx, uint64_t epoch) {
+    (void)ctx;
+    (void)epoch;
+    return 0; // verify-only harness never advances
+}
+
+static int cli_read_attestation(void *ctx, uint8_t digest[32]) {
+    cli_platform_t *p = ctx;
+    if (!p->latch_valid) return 0;
+    memcpy(digest, p->latch, 32);
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 8) {
-        fprintf(stderr, "Usage: %s <cert_path> <key_id_hex> <max_wcet_ns> <max_budget> <max_agents> <max_leakage> <last_epoch>\n", argv[0]);
+    if (argc != 9) {
+        fprintf(stderr, "Usage: %s <cert_path> <key_id_hex> <max_wcet_ns> <max_budget> <max_agents> <max_leakage> <stored_epoch> <attested_digest_hex|none>\n", argv[0]);
         return 2;
     }
 
@@ -28,7 +53,19 @@ int main(int argc, char *argv[]) {
     anchor.max_budget = strtoull(argv[4], NULL, 10);
     anchor.max_agents = (uint8_t)atoi(argv[5]);
     anchor.max_leakage = (uint8_t)atoi(argv[6]);
-    uint64_t last_epoch = strtoull(argv[7], NULL, 10);
+
+    cli_platform_t plat;
+    plat.stored_epoch = strtoull(argv[7], NULL, 10);
+    plat.latch_valid = strcmp(argv[8], "none") != 0;
+    memset(plat.latch, 0, sizeof(plat.latch));
+    if (plat.latch_valid && hex_to_bytes(argv[8], plat.latch, 32) != 0) {
+        fprintf(stderr, "Invalid attested_digest hex\n");
+        return 2;
+    }
+    anchor.read_epoch = cli_read_epoch;
+    anchor.advance_epoch = cli_advance_epoch;
+    anchor.read_attestation = cli_read_attestation;
+    anchor.ctx = &plat;
 
     if (hex_to_bytes(key_id_hex, anchor.key_id, 32) != 0) {
         fprintf(stderr, "Invalid key_id hex\n");
@@ -49,7 +86,7 @@ int main(int argc, char *argv[]) {
     }
     fclose(f);
 
-    int res = verify_cert(cert, &anchor, last_epoch);
+    int res = verify_cert(cert, &anchor);
 
     if (res == 1) {
         printf("VERIFIED\n");
